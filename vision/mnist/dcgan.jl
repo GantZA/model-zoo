@@ -4,6 +4,7 @@ using Base.Iterators: partition
 using Distributions: Uniform
 using CUDAnative: tanh, log, exp
 using CuArrays
+using Statistics: mean
 
 # Encode MNIST images as compressed vectors that can later be decoded back into
 # images.
@@ -32,7 +33,7 @@ fc_gen = Chain(Dense(noise_dim, 1024, relu), BatchNorm(1024),
 deconv_ = Chain(ConvTranspose((4,4), channels=>64, relu; stride=(2,2), pad=(1,1)), BatchNorm(64),
                 ConvTranspose((4,4), 64=>1, tanh; stride=(2,2), pad=(1,1)))
 
-generator = Chain(fc_gen..., x->reshape(x, 7, 7, channels, :), deconv_..., 
+generator = Chain(fc_gen..., x->reshape(x, 7, 7, channels, :), deconv_...,
 			     x->reshape(x, 784, :)) |> gpu
 
 ################################## Discriminator ###############################
@@ -41,7 +42,7 @@ fc_disc = Chain(Dense(1024, 1024, leakyrelu), Dense(1024, 1))
 conv_ = Chain(Conv((5,5), 1=>32, leakyrelu), x->maxpool(x, (2,2)),
               Conv((5,5), 32=>64, leakyrelu), x->maxpool(x, (2,2)))
 
-discriminator = Chain(x->reshape(x, 28, 28, 1, :), 
+discriminator = Chain(x->reshape(x, 28, 28, 1, :),
 		      conv_..., x->reshape(x, 1024, :), fc_disc...) |> gpu
 
 ################################################################################
@@ -65,18 +66,18 @@ end
 
 using Images
 
-img(x) = Gray.(reshape((x+1)/2, 28, 28))
+img(x) = Gray.(reshape((x.+1)/2, 28, 28))
 
 function sample()
   # 36 random digits
   noise = [rand(dist, noise_dim, 1) for i=1:36]
   noise = gpu.(noise)
-  
+
   # Generating images
   testmode!(generator)
   fake_imgs = img.(map(x -> cpu(generator(x).data), noise))
   testmode!(generator, false)
-  
+
   # Stack them all together
   img_grid = vcat([hcat(imgs...) for imgs in partition(fake_imgs, 6)]...)
 end
@@ -87,23 +88,23 @@ cd(@__DIR__)
 # binary cross entropy
 function bce(ŷ, y)
   neg_abs = -abs.(ŷ)
-  mean(relu.(ŷ) .- ŷ .* y .+ log.(1 + exp.(neg_abs)))
+  mean(relu.(ŷ) .- ŷ .* y .+ log.(1 .+ exp.(neg_abs)))
 end
 
 function train(x)
   global training_steps
 
   z = rand(dist, noise_dim, BATCH_SIZE) |> gpu
-  inp = 2x - 1 |> gpu
- 
+  inp = 2x .- 1 |> gpu
+
   zero_grad!(discriminator)
- 
+
   D_real = discriminator(inp)
-  D_real_loss = bce(D_real, ones(D_real.data))
+  D_real_loss = bce(D_real, CuArray(ones(Float32,size(D_real.data))))
 
   fake_x = generator(z)
   D_fake = discriminator(fake_x)
-  D_fake_loss = bce(D_fake, zeros(D_fake.data))
+  D_fake_loss = bce(D_fake, CuArray(zero(D_fake.data)))
 
   D_loss = D_real_loss + D_fake_loss
 
@@ -111,11 +112,11 @@ function train(x)
   opt_disc()
 
   zero_grad!(generator)
-  
+
   z = rand(dist, noise_dim, BATCH_SIZE) |> gpu
   fake_x = generator(z)
   D_fake = discriminator(fake_x)
-  G_loss = bce(D_fake, ones(D_fake.data))
+  G_loss = bce(D_fake, CuArray(ones(Float32,size(D_fake.data))))
 
   Flux.back!(G_loss)
   opt_gen()
